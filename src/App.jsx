@@ -1,6 +1,63 @@
 import { useState, useRef, useEffect } from "react";
 
 
+
+// ── PocketBase ─────────────────────────────────────────────────────────────
+const PB_URL = "https://chamber-outline-technology-sol.trycloudflare.com";
+
+const pbFetch = async (path, options = {}) => {
+  const res = await fetch(`${PB_URL}/api${path}`, {
+    headers: { "Content-Type": "application/json", ...options.headers },
+    ...options,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+};
+
+const pb = {
+  async getAll() {
+    const data = await pbFetch("/collections/Intervention/records?perPage=500&sort=-created");
+    return data.items.map(r => ({
+      id: r.id,
+      client: r.client || "",
+      adresse: r.adresse || "",
+      description: r.description || "",
+      technicien: r.technicien || "",
+      date: r.date || "",
+      heure: r.heure || "",
+      statut: r.statut || "En attente",
+      priorite: r.priorite || "Normale",
+      taches: r.taches || makeTaches(),
+      materiaux: r.materiaux || [],
+      tempsHeures: r.tempsHeures || "",
+      tempsMinutes: r.tempsMinutes || "",
+      notesInternes: r.notesInternes || "",
+      photosAvant: r.photosAvant || [],
+      photosApres: r.photosApres || [],
+      signature: r.signature || null,
+      gps: r.gps || null,
+    }));
+  },
+  async create(data) {
+    return pbFetch("/collections/Intervention/records", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+  async update(id, data) {
+    return pbFetch(`/collections/Intervention/records/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  },
+  async delete(id) {
+    const res = await fetch(`${PB_URL}/api/collections/Intervention/records/${id}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) throw new Error(await res.text());
+  },
+};
+
 // ── Entreprise ─────────────────────────────────────────────────────────────
 const ENTREPRISE = {
   nom: "SGS Télésurveillance",
@@ -840,7 +897,9 @@ export default function App() {
   const [view, setView] = useState("list");
   const [showHistorique, setShowHistorique] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
-  const [interventions, setInterventions] = useState(SAMPLES);
+  const [loading, setLoading] = useState(true);
+  const [pbError, setPbError] = useState(null);
+  const [interventions, setInterventions] = useState([]);
   const [selected, setSelected] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editId, setEditId] = useState(null);
@@ -849,6 +908,13 @@ export default function App() {
   const [formTab, setFormTab] = useState("infos");
   const [geoLoading, setGeoLoading] = useState(false);
   const [pdfIntervention, setPdfIntervention] = useState(null);
+
+  // Charger les interventions depuis PocketBase au démarrage
+  useEffect(() => {
+    pb.getAll()
+      .then(data => { setInterventions(data); setLoading(false); })
+      .catch(err => { console.error(err); setPbError("Impossible de se connecter au serveur."); setLoading(false); });
+  }, []);
 
   const set = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
@@ -865,28 +931,51 @@ export default function App() {
   const openEdit = (iv) => { setForm({ ...iv }); setEditId(iv.id); setFormTab("infos"); setView("form"); };
   const openDetail = (iv) => { setSelected(iv); setView("detail"); };
 
-  const save = () => {
+  const save = async () => {
     if (!form.client || !form.description || !form.technicien || !form.date) {
       showToast("Remplissez les champs obligatoires.", "error");
       setFormTab("infos");
       return;
     }
-    if (editId) {
-      setInterventions(p => p.map(i => i.id === editId ? { ...form, id: editId } : i));
-      showToast("Fiche mise à jour ✓");
-    } else {
-      setInterventions(p => [...p, { ...form, id: Date.now() }]);
-      showToast("Fiche créée ✓");
+    try {
+      const { id, ...data } = form;
+      if (editId) {
+        await pb.update(editId, data);
+        setInterventions(p => p.map(i => i.id === editId ? { ...form, id: editId } : i));
+        showToast("Fiche mise à jour ✓");
+      } else {
+        const created = await pb.create(data);
+        setInterventions(p => [...p, { ...form, id: created.id }]);
+        showToast("Fiche créée ✓");
+      }
+      setView("list");
+    } catch (err) {
+      showToast("Erreur de sauvegarde. Vérifiez la connexion.", "error");
+      console.error(err);
     }
-    setView("list");
   };
 
-  const del = (id) => { setInterventions(p => p.filter(i => i.id !== id)); setView("list"); showToast("Fiche supprimée."); };
+  const del = async (id) => {
+    try {
+      await pb.delete(id);
+      setInterventions(p => p.filter(i => i.id !== id));
+      setView("list");
+      showToast("Fiche supprimée.");
+    } catch (err) {
+      showToast("Erreur lors de la suppression.", "error");
+      console.error(err);
+    }
+  };
 
-  const changeStatut = (id, statut) => {
-    setInterventions(p => p.map(i => i.id === id ? { ...i, statut } : i));
-    if (selected?.id === id) setSelected(s => ({ ...s, statut }));
-    showToast(`Statut : ${statut}`);
+  const changeStatut = async (id, statut) => {
+    try {
+      await pb.update(id, { statut });
+      setInterventions(p => p.map(i => i.id === id ? { ...i, statut } : i));
+      if (selected?.id === id) setSelected(s => ({ ...s, statut }));
+      showToast(`Statut : ${statut}`);
+    } catch (err) {
+      showToast("Erreur de mise à jour.", "error");
+    }
   };
 
   // Géolocalisation
@@ -939,6 +1028,24 @@ export default function App() {
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Inter','Segoe UI',sans-serif", color: C.text }}>
 
       {!currentUser && <LoginScreen users={users} onLogin={user => { setCurrentUser(user); if (user.role === "technicien") { setForm(f => ({ ...f, technicien: user.nom })); } }} />}
+      {currentUser && loading && (
+        <div style={{ position: "fixed", inset: 0, background: C.navy, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 999 }}>
+          <div style={{ color: "#fff", fontSize: 16, fontWeight: 700, marginBottom: 12 }}>Chargement des fiches…</div>
+          <div style={{ width: 48, height: 48, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #fff", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
+      {currentUser && !loading && pbError && (
+        <div style={{ position: "fixed", inset: 0, background: C.navy, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 999, padding: 24 }}>
+          <div style={{ fontSize: 40, marginBottom: 16 }}>⚠️</div>
+          <div style={{ color: "#fff", fontSize: 16, fontWeight: 700, marginBottom: 8, textAlign: "center" }}>Serveur inaccessible</div>
+          <div style={{ color: "rgba(255,255,255,0.6)", fontSize: 13, textAlign: "center", marginBottom: 20 }}>Vérifiez que PocketBase tourne sur le PC au bureau.</div>
+          <button onClick={() => { setPbError(null); setLoading(true); pb.getAll().then(data => { setInterventions(data); setLoading(false); }).catch(() => { setPbError("Impossible de se connecter."); setLoading(false); }); }}
+            style={{ background: C.orange, border: "none", color: "#fff", borderRadius: 8, padding: "10px 24px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+            Réessayer
+          </button>
+        </div>
+      )}
       {currentUser && <>
 
       {/* ── Header ── */}
