@@ -14,6 +14,37 @@ const pbFetch = async (path, options = {}) => {
   return res.json();
 };
 
+const pbUsers = {
+  async getAll() {
+    const data = await pbFetch("/collections/techniciens/records?perPage=500");
+    return data.items.map(r => ({
+      id: r.id,
+      nom: r.nom,
+      login: r.login,
+      password: r.password,
+      role: r.role || "technicien",
+    }));
+  },
+  async create(data) {
+    return pbFetch("/collections/techniciens/records", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+  async update(id, data) {
+    return pbFetch(`/collections/techniciens/records/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  },
+  async delete(id) {
+    const res = await fetch(`${PB_URL}/api/collections/techniciens/records/${id}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) throw new Error(await res.text());
+  },
+};
+
 const pb = {
   async getAll() {
     const data = await pbFetch("/collections/Intervention/records?perPage=500&sort=-created");
@@ -625,7 +656,7 @@ function LoginScreen({ onLogin, users }) {
   const [showPwd, setShowPwd] = useState(false);
 
   const handleSubmit = () => {
-    const user = users.find(u => u.login === login.trim().toLowerCase() && u.password === password);
+    const user = users.find(u => u.login.toLowerCase() === login.trim().toLowerCase() && u.password === password);
     if (user) {
       onLogin(user);
     } else {
@@ -909,10 +940,17 @@ export default function App() {
   const [geoLoading, setGeoLoading] = useState(false);
   const [pdfIntervention, setPdfIntervention] = useState(null);
 
-  // Charger les interventions depuis PocketBase au démarrage
+  // Charger les interventions et les techniciens depuis PocketBase au démarrage
   useEffect(() => {
-    pb.getAll()
-      .then(data => { setInterventions(data); setLoading(false); })
+    Promise.all([pb.getAll(), pbUsers.getAll()])
+      .then(([interventionsData, techniciensData]) => {
+        setInterventions(interventionsData);
+        if (techniciensData.length > 0) {
+          const admin = USERS.find(u => u.role === "admin");
+          setUsers([admin, ...techniciensData]);
+        }
+        setLoading(false);
+      })
       .catch(err => { console.error(err); setPbError("Impossible de se connecter au serveur."); setLoading(false); });
   }, []);
 
@@ -1484,9 +1522,31 @@ export default function App() {
       {showAdmin && (
         <AdminPanel
           users={users}
-          onUpdate={updatedTechs => {
-            const admin = users.find(u => u.role === "admin");
-            setUsers([admin, ...updatedTechs]);
+          onUpdate={async (updatedTechs) => {
+            const admins = users.filter(u => u.role === "admin");
+            setUsers([...admins, ...updatedTechs]);
+            // Sync avec PocketBase
+            try {
+              const existing = await pbUsers.getAll();
+              // Supprimer ceux qui n'existent plus
+              for (const ex of existing) {
+                if (!updatedTechs.find(u => u.id === ex.id)) {
+                  await pbUsers.delete(ex.id);
+                }
+              }
+              // Créer ou mettre à jour
+              for (const tech of updatedTechs) {
+                const { id, ...data } = tech;
+                if (existing.find(u => u.id === id)) {
+                  await pbUsers.update(id, data);
+                } else {
+                  const created = await pbUsers.create(data);
+                  tech.id = created.id;
+                }
+              }
+            } catch (err) {
+              console.error("Erreur sync techniciens:", err);
+            }
           }}
           onClose={() => setShowAdmin(false)}
         />
